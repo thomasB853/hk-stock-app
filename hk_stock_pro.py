@@ -61,10 +61,10 @@ def get_trading_dates(start_date, days):
         current_date += timedelta(days=1)
     return trading_dates
 
-# ================== 數據獲取（核心修復：列名兼容） ==================
+# ================== 數據獲取（核心修復：列名類型兼容） ==================
 @st.cache_data(ttl=3600)
 def get_data(symbol):
-    """使用yfinance獲取港股數據，兼容列名大小寫"""
+    """使用yfinance獲取港股數據，兼容列名類型和大小寫"""
     try:
         # 拼接yfinance格式：代碼.HK
         yf_symbol = f"{symbol}.HK"
@@ -81,16 +81,26 @@ def get_data(symbol):
             progress=False
         )
         
-        # 核心修復1：檢查數據是否為空
+        # 檢查數據是否為空
         if df.empty:
             st.error(f"❌ 未獲取到 {yf_symbol} 的數據，請確認代碼正確或該股票有公開交易數據")
             return None
         
-        # 核心修復2：重置索引並統一列名（兼容大小寫）
+        # 重置索引
         df.reset_index(inplace=True)
         
-        # 強制將列名轉為小寫，再統一映射為大寫
-        df.columns = [col.lower() for col in df.columns]
+        # 核心修復：統一列名格式（處理元組/字符串混合的情況）
+        new_columns = []
+        for col in df.columns:
+            # 如果是元組，取最後一個元素並轉字符串；如果是字符串直接使用
+            if isinstance(col, tuple):
+                col_str = str(col[-1])
+            else:
+                col_str = str(col)
+            new_columns.append(col_str.lower())  # 轉小寫統一格式
+        df.columns = new_columns
+        
+        # 統一列名映射（小寫→大寫）
         column_mapping = {
             'date': 'Date',
             'open': 'Open',
@@ -101,9 +111,10 @@ def get_data(symbol):
             'volume': 'Volume'
         }
         # 只重命名存在的列
-        df = df.rename(columns={k: v for k, v in column_mapping.items() if k in df.columns})
+        rename_dict = {k: v for k, v in column_mapping.items() if k in df.columns}
+        df.rename(columns=rename_dict, inplace=True)
         
-        # 核心修復3：檢查必要列是否存在
+        # 檢查必要列是否存在
         required_cols = ["Date", "Open", "High", "Low", "Close", "Volume"]
         missing_cols = [col for col in required_cols if col not in df.columns]
         if missing_cols:
@@ -237,65 +248,4 @@ if st.button("🚀 開始專業分析"):
             if last_close < sup:
                 st.success(f"當前價 {last_close:.2f} HK$：低於支撐位（超賣區間）")
             elif last_close > res:
-                st.warning(f"當前價 {last_close:.2f} HK$：高於壓力位（超買區間）")
-            else:
-                st.info(f"當前價 {last_close:.2f} HK$：處於支撐壓力區間")
-
-        # 繪製RSI指標圖
-        st.subheader("RSI 14日超買超賣指標")
-        fig_r, ax_r = plt.subplots(figsize=(10,3))
-        ax_r.plot(df["Date"], df["RSI"], color="purple", linewidth=1)
-        ax_r.axhline(70, c="red", ls="--", alpha=0.7, label="超買線(70)")
-        ax_r.axhline(30, c="green", ls="--", alpha=0.7, label="超賣線(30)")
-        ax_r.axhline(50, c="gray", ls=":", alpha=0.5, label="中軸(50)")
-        ax_r.set_title("RSI 走勢", fontsize=10)
-        ax_r.set_xlabel("日期", fontsize=8)
-        ax_r.set_ylabel("RSI 值", fontsize=8)
-        ax_r.legend(fontsize=8)
-        ax_r.tick_params(axis='both', labelsize=7)
-        plt.xticks(rotation=45)
-        st.pyplot(fig_r)
-
-        # 展示價格預測結果
-        st.subheader(f"🔮 未來 {predict_days} 天價格預測（線性回歸）")
-        trend = "📈 上漲趨勢" if slope > 0 else "📉 下跌趨勢" if slope < 0 else "📊 平盤趨勢"
-        st.success(f"整體趨勢：{trend} (斜率：{slope:.6f})")
-        
-        # 生成交易日預測日期
-        last_trading_day = df["Date"].iloc[-1]
-        pred_dates = get_trading_dates(last_trading_day + timedelta(days=1), predict_days)
-        pred_df = pd.DataFrame({
-            "預測日期": [d.strftime("%Y-%m-%d") for d in pred_dates],
-            "預測價格 (HK$)": [round(p, 2) for p in pred[:len(pred_dates)]]
-        })
-        st.dataframe(pred_df, use_container_width=True)
-        st.info(f"當前價：{last_close:.2f} HK$ → 最後預測價：{pred[-1]:.2f} HK$")
-
-        # 綜合技術研判
-        st.subheader("📌 系統研判（僅供參考）")
-        rsi = df["RSI"].iloc[-1]
-        ma5 = df["MA5"].iloc[-1]
-        ma20 = df["MA20"].iloc[-1]
-
-        col_advice1, col_advice2 = st.columns(2)
-        with col_advice1:
-            st.markdown("### 技術指標狀態")
-            st.write(f"RSI當前值：{rsi:.1f}")
-            st.write(f"MA5：{ma5:.2f} | MA20：{ma20:.2f}")
-            st.write(f"價格/MA5：{'↑ 站穩' if last_close > ma5 else '↓ 跌破'}")
-            st.write(f"MA5/MA20：{'↑ 金叉' if ma5 > ma20 else '↓ 死叉'}")
-
-        with col_advice2:
-            st.markdown("### 操作建議")
-            if ma5 > ma20 and rsi < 65:
-                st.success("✅ 趨勢向上，可適度關注")
-            elif ma5 < ma20:
-                st.warning("⚠️ 短期趨勢偏弱，謹慎操作")
-            elif rsi > 70:
-                st.warning("⚠️ RSI超買，注意回調風險")
-            elif rsi < 30:
-                st.success("✅ RSI超賣，可留意反彈機會")
-            else:
-                st.info("🔍 震盪區間，建議觀察為主")
-
-st.caption("⚠️ 本工具僅供學習分析，不構成任何投資建議｜數據來源：Yahoo Finance")
+                st.warning(f"當前價 {
