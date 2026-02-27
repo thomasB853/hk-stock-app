@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import warnings
 from datetime import datetime, timedelta
-# 核心修復：確保yfinance導入兼容（若安裝失敗給出提示）
+# 導入yfinance並增加異常處理
 try:
     import yfinance as yf
 except ImportError:
@@ -18,7 +18,7 @@ st.set_page_config(page_title="港股專業頂級版", layout="wide")
 st.title("📈 港股分析預測系統｜專業頂級版")
 st.markdown("### 支持：騰訊、美團、匯豐、美高梅、金沙、工行、阿里等")
 
-# ================== 熱門港股（适配yfinance格式） ==================
+# ================== 熱門港股 ==================
 hot_stocks = {
     "騰訊控股": "0700",
     "美團": "3690",
@@ -61,10 +61,10 @@ def get_trading_dates(start_date, days):
         current_date += timedelta(days=1)
     return trading_dates
 
-# ================== 數據獲取（基於yfinance，國際可訪問） ==================
+# ================== 數據獲取（核心修復：列名兼容） ==================
 @st.cache_data(ttl=3600)
 def get_data(symbol):
-    """使用yfinance獲取港股數據"""
+    """使用yfinance獲取港股數據，兼容列名大小寫"""
     try:
         # 拼接yfinance格式：代碼.HK
         yf_symbol = f"{symbol}.HK"
@@ -81,16 +81,37 @@ def get_data(symbol):
             progress=False
         )
         
-        # 數據清洗與重命名
+        # 核心修復1：檢查數據是否為空
         if df.empty:
-            st.error(f"❌ 未獲取到 {yf_symbol} 的數據，請確認代碼正確")
+            st.error(f"❌ 未獲取到 {yf_symbol} 的數據，請確認代碼正確或該股票有公開交易數據")
             return None
         
+        # 核心修復2：重置索引並統一列名（兼容大小寫）
         df.reset_index(inplace=True)
-        df.rename(columns={
-            'Date': 'Date', 'Open': 'Open', 'High': 'High',
-            'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'
-        }, inplace=True)
+        
+        # 強制將列名轉為小寫，再統一映射為大寫
+        df.columns = [col.lower() for col in df.columns]
+        column_mapping = {
+            'date': 'Date',
+            'open': 'Open',
+            'high': 'High',
+            'low': 'Low',
+            'close': 'Close',
+            'adj close': 'Adj Close',
+            'volume': 'Volume'
+        }
+        # 只重命名存在的列
+        df = df.rename(columns={k: v for k, v in column_mapping.items() if k in df.columns})
+        
+        # 核心修復3：檢查必要列是否存在
+        required_cols = ["Date", "Open", "High", "Low", "Close", "Volume"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            st.error(f"❌ 數據獲取失敗：缺少必要列 {missing_cols}")
+            st.info("💡 可能原因：該股票暫無公開交易數據，或yfinance數據源暫時異常")
+            return None
+        
+        # 數據清洗
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date").dropna(subset=["Close"]).reset_index(drop=True)
         
@@ -100,11 +121,11 @@ def get_data(symbol):
         return df
     
     except Exception as e:
-        st.error(f"數據獲取失敗：{str(e)}")
+        st.error(f"❌ 數據獲取失敗：{str(e)}")
         st.info("🔍 排查建議：")
-        st.info("1. 港股代碼需為4-5位數字（如小米=1810）")
+        st.info("1. 港股代碼需為4-5位數字（如小米=1810，騰訊=0700）")
         st.info("2. 刷新頁面重試（網絡偶發波動）")
-        st.info("3. 確認該股票在港交所正常上市交易")
+        st.info("3. 確認該股票在港交所正常上市交易（非停牌/退市狀態）")
         return None
 
 # 計算技術指標
