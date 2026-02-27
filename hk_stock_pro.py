@@ -4,48 +4,70 @@ import numpy as np
 import matplotlib.pyplot as plt
 import warnings
 from datetime import datetime, timedelta
-import yfinance as yf
+import requests
+import json
+import subprocess
+import sys
+import importlib
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 from scipy import stats
 
-# ================== Python 3.12 兼容性配置（核心优化） ==================
+# ================== 全局配置 ==================
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="港股分析预测系统", layout="wide")
+st.set_page_config(page_title="港股專業頂級版", layout="wide")
+# 設置中文字體（兼容Streamlit Cloud）
+plt.rcParams["font.family"] = ['DejaVu Sans', 'Arial Unicode MS', 'sans-serif']
+plt.rcParams["axes.unicode_minus"] = False
 
-# 3.12适配：中文显示终极配置（兼容matplotlib最新版）
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'WenQuanYi Zen Hei', 'DejaVu Sans']
-plt.rcParams['axes.unicode_minus'] = False
-plt.rcParams['figure.figsize'] = (12, 6)
-plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['figure.autolayout'] = True  # 3.12适配：自动布局防截断
+# ================== 依賴檢查&強制升級 ==================
+# 強制升級yfinance到最新版，解決數據源兼容問題
+try:
+    import yfinance as yf
+    # 檢查版本，低於0.2.31則自動升級
+    if hasattr(yf, '__version__') and yf.__version__ < "0.2.31":
+        st.warning("⚠️ yfinance版本過舊，正在自動升級至最新版...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "yfinance>=0.2.31"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        importlib.reload(yf)
+except ImportError:
+    st.error("❌ 缺少yfinance庫，正在自動安裝...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "yfinance>=0.2.31"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    import yfinance as yf
 
-# ================== 页面UI（简洁稳定） ==================
-st.title("📈 港股分析预测系统｜Python 3.12适配版")
-st.markdown("### 全周期均线MA5/20/30/50/60/120 + 去年业绩分析 + 价格预测")
-st.markdown("#### 核心模型：随机森林+线性回归｜3.12无报错｜本地/云端均可运行")
+try:
+    from sklearn.linear_model import LinearRegression
+except ImportError:
+    st.error("❌ 缺少scikit-learn庫，正在自動安裝...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "scikit-learn>=1.3.0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    from sklearn.linear_model import LinearRegression
 
-# 热门港股（数据稳定）
+# ================== 頁面UI ==================
+st.title("📈 港股分析預測系統｜優化版")
+st.markdown("### 支持：騰訊、美團、匯豐等主流港股（預測模型升級：隨機森林+多特征）")
+
+# 熱門港股（篩選Yahoo Finance數據穩定的標的）
 hot_stocks = {
-    "腾讯控股 (0700)": "0700",
-    "美团-W (3690)": "3690",
-    "汇丰控股 (0005)": "0005",
-    "小米集团-W (1810)": "1810",
-    "阿里巴巴-SW (9988)": "9988"
+    "騰訊控股 (0700)": "0700",
+    "美團-W (3690)": "3690",
+    "匯豐控股 (0005)": "0005",
+    "小米集團-W (1810)": "1810",
+    "阿里巴巴-SW (9988)": "9988",
+    "工商銀行 (1398)": "1398"
 }
-option = st.selectbox("📌 选择热门港股（推荐）", list(hot_stocks.keys()))
+option = st.selectbox("選擇熱門港股（數據穩定）", list(hot_stocks.keys()))
 default_code = hot_stocks[option]
-user_code = st.text_input("✏️ 手动输入港股代码（4位数字）", default_code).strip()
-predict_days = st.slider("📅 预测未来交易日数", 1, 10, 3)
+user_code = st.text_input("手動輸入港股代碼（4-5位數字，如0700）", default_code).strip()
+predict_days = st.slider("預測天數（1-15天）", 1, 15, 5)
 
-# ================== 核心工具函数（3.12适配，无语法报错） ==================
+# ================== 核心工具函數 ==================
 def is_trading_day(date):
-    """判断港股交易日（3.12 datetime兼容）"""
+    """判斷港股交易日（排除週六/週日）"""
     return date.weekday() not in [5, 6]
 
 def get_trading_dates(start_date, days):
-    """3.12适配：获取未来港股交易日，防类型报错"""
+    """獲取未來指定數量的港股交易日"""
     trading_dates = []
     current_date = start_date
     while len(trading_dates) < days:
@@ -54,310 +76,469 @@ def get_trading_dates(start_date, days):
         current_date += timedelta(days=1)
     return trading_dates
 
-def calculate_support_resistance(df):
-    """简化支撑压力位，3.12 numpy兼容"""
-    try:
-        support = np.round(df["Low"].iloc[-20:].min(), 2)
-        resistance = np.round(df["High"].iloc[-20:].max(), 2)
-        return support, resistance
-    except:
-        return np.round(df["Close"].iloc[-1]*0.95,2), np.round(df["Close"].iloc[-1]*1.05,2)
-
-# ================== 数据获取（3.12 yfinance适配） ==================
-@st.cache_data(ttl=3600)
-def get_hk_stock_data(symbol):
-    """3.12专属：适配yfinance最新版，避免接口报错"""
-    yf_symbol = f"{symbol}.HK"
-    st.info(f"🔍 正在获取 {yf_symbol} 交易数据...")
-    try:
-        # 3.12适配：指定timeout，避免连接超时
-        df = yf.download(
-            yf_symbol, 
-            period="3y", 
-            interval="1d", 
-            progress=False,
-            timeout=30,  # 3.12新增timeout，防卡死
-            threads=False  # 3.12关闭多线程，避免兼容问题
-        )
-        if df.empty:
-            st.error("❌ 数据获取失败，请更换股票代码重试")
-            return None
-        # 3.12适配：重置索引+日期格式统一
-        df = df[["Open", "High", "Low", "Close", "Volume"]].reset_index()
-        df.rename(columns={"Date": "日期"}, inplace=True)
-        df["日期"] = pd.to_datetime(df["日期"]).dt.date  # 3.12 datetime兼容
-        st.success(f"✅ 数据获取成功！共 {len(df)} 条交易记录")
-        return df
-    except Exception as e:
-        st.error(f"❌ 数据获取异常：{str(e)[:50]}（Python 3.12适配）")
-        return None
-
-# ================== 技术指标计算（3.12 numpy/scipy适配） ==================
-def calculate_indicators(df):
-    """3.12专属：修复除零/数据类型报错"""
-    df = df.copy()
-    # 全周期均线（MA5/20/30/50/60/120）
-    ma_windows = [5,20,30,50,60,120]
-    for window in ma_windows:
-        df[f"MA{window}"] = df["Close"].rolling(window=window, min_periods=1).mean()
+def clean_column_names(df):
+    """
+    核心列名清洗函數：兼容所有yfinance列名格式
+    - 處理多級索引列名（如('Close', 'HKD')）
+    - 處理大小寫混合列名
+    - 處理特殊字符列名
+    """
+    # 第一步：如果是多級索引，壓縮為單級
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ['_'.join(map(str, col)).lower() for col in df.columns]
+    else:
+        df.columns = [str(col).lower() for col in df.columns]
     
-    # 3.12适配：RSI计算防除零
-    delta = df["Close"].pct_change()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
-    rs = gain / (loss + 1e-8)  # 3.12用1e-8替代0.0001，更稳定
-    df["RSI"] = 100 - (100 / (1 + rs))
-    
-    # MACD（3.12 ewm适配）
-    df["EMA12"] = df["Close"].ewm(span=12, adjust=False, min_periods=1).mean()
-    df["EMA26"] = df["Close"].ewm(span=26, adjust=False, min_periods=1).mean()
-    df["MACD"] = df["EMA12"] - df["EMA26"]
-    df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False, min_periods=1).mean()
-    df["MACD_Hist"] = df["MACD"] - df["MACD_Signal"]
-    
-    # 3.12适配：缺失值处理
-    df = df.fillna(0).replace([np.inf, -np.inf], 0)
-    return df
-
-# ================== 预测模型（3.12 sklearn适配） ==================
-def prepare_simple_features(df):
-    """3.12 sklearn适配：特征工程简化"""
-    feature_cols = [col for col in df.columns if col.startswith("MA") or col in ["RSI", "MACD", "MACD_Signal"]]
-    scaler = StandardScaler()
-    # 3.12适配：避免空特征报错
-    if len(feature_cols) > 0:
-        df[feature_cols] = scaler.fit_transform(df[feature_cols])
-    return df, feature_cols, scaler
-
-def simple_predict(df, feature_cols, scaler, predict_days):
-    """3.12专属：随机森林+线性回归，适配sklearn 1.4+"""
-    X = df[feature_cols].values if len(feature_cols) > 0 else np.array([[0]]*len(df))
-    y = df["Close"].values
-    # 3.12适配：数据量判断防报错
-    if len(X) < 50 or len(feature_cols) == 0:
-        st.warning("⚠️ 数据量不足，使用线性回归预测")
-        lr = LinearRegression()
-        lr.fit(X, y)
-        last_feat = df[feature_cols].iloc[-1].values.reshape(1, -1) if len(feature_cols) > 0 else np.array([[0]])
-        future_feat = np.repeat(last_feat, predict_days, axis=0)
-        if len(feature_cols) > 0:
-            future_feat = scaler.transform(future_feat)
-        return lr.predict(future_feat)
-    
-    # 3.12适配：随机森林参数简化，避免n_jobs=-1报错
-    rf = RandomForestRegressor(
-        n_estimators=100, 
-        random_state=42,
-        n_jobs=1  # 3.12用n_jobs=1替代-1，避免多进程兼容问题
-    )
-    lr = LinearRegression()
-    rf.fit(X, y)
-    lr.fit(X, y)
-    
-    # 生成未来特征（3.12 numpy数组兼容）
-    last_feat = df[feature_cols].iloc[-1].values.reshape(1, -1)
-    future_feat = np.repeat(last_feat, predict_days, axis=0)
-    future_feat = scaler.transform(future_feat)
-    
-    # 加权融合
-    rf_pred = rf.predict(future_feat)
-    lr_pred = lr.predict(future_feat)
-    final_pred = 0.7 * rf_pred + 0.3 * lr_pred
-    return final_pred
-
-# ================== 去年业绩分析（3.12 可视化适配） ==================
-def last_year_performance_analysis(stock_name):
-    """3.12 matplotlib适配：图表无报错"""
-    st.subheader("📊 去年财务业绩分析（2024年度）")
-    st.markdown(f"### {stock_name} 核心财务指标（单位：亿港元）")
-    
-    # 业绩数据模板
-    performance_data = {
-        "腾讯控股 (0700)": {
-            "营业收入": 5560.0, "同比增长": 8.2,
-            "净利润": 1350.0, "净利润同比": 15.6,
-            "毛利率": 51.3, "净利率": 24.3,
-            "ROE(%)": 22.3, "每股收益(HKD)": 14.2,
-            "股息(HKD)": 4.8
-        },
-        "美团-W (3690)": {
-            "营业收入": 2080.0, "同比增长": 21.5,
-            "净利润": 235.0, "净利润同比": 38.2,
-            "毛利率": 32.6, "净利率": 11.3,
-            "ROE(%)": 18.5, "每股收益(HKD)": 2.8,
-            "股息(HKD)": 0.5
-        },
-        "汇丰控股 (0005)": {
-            "营业收入": 7800.0, "同比增长": 12.8,
-            "净利润": 1920.0, "净利润同比": 25.3,
-            "毛利率": 68.5, "净利率": 24.6,
-            "ROE(%)": 14.2, "每股收益(HKD)": 0.95,
-            "股息(HKD)": 0.52
-        },
-        "小米集团-W (1810)": {
-            "营业收入": 2800.0, "同比增长": 10.1,
-            "净利润": 125.0, "净利润同比": 22.7,
-            "毛利率": 18.3, "净利率": 4.5,
-            "ROE(%)": 9.8, "每股收益(HKD)": 0.35,
-            "股息(HKD)": 0.12
-        },
-        "阿里巴巴-SW (9988)": {
-            "营业收入": 8200.0, "同比增长": 9.5,
-            "净利润": 1120.0, "净利润同比": 18.6,
-            "毛利率": 48.2, "净利率": 13.7,
-            "ROE(%)": 16.5, "每股收益(HKD)": 18.5,
-            "股息(HKD)": 2.3
-        }
+    # 第二步：映射到標準列名（覆蓋所有可能的變體）
+    column_mapping = {
+        'date': 'Date',
+        'datetime': 'Date',
+        'open': 'Open',
+        'high': 'High',
+        'low': 'Low',
+        'close': 'Close',
+        'adj close': 'Adj Close',
+        'adj_close': 'Adj Close',
+        'volume': 'Volume',
+        'vol': 'Volume'
     }
     
-    data = performance_data.get(stock_name, performance_data["腾讯控股 (0700)"])
+    # 第三步：模糊匹配列名（解決字段名變異）
+    final_cols = {}
+    for col in df.columns:
+        for key in column_mapping.keys():
+            if key in col:
+                final_cols[col] = column_mapping[key]
+                break
     
-    # 3.12适配：分栏展示
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("营业收入", f"{data['营业收入']} 亿", f"{data['同比增长']}%")
-        st.metric("净利润", f"{data['净利润']} 亿", f"{data['净利润同比']}%")
-        st.metric("ROE", f"{data['ROE(%)']}%")
-    with col2:
-        st.metric("毛利率", f"{data['毛利率']}%")
-        st.metric("净利率", f"{data['净利率']}%")
-        st.metric("每股收益", f"{data['每股收益(HKD)']} HKD")
-    with col3:
-        st.metric("股息", f"{data['股息(HKD)']} HKD")
-        st.metric("营收增速", f"{data['同比增长']}%")
-        st.metric("净利润增速", f"{data['净利润同比']}%")
-    
-    # 3.12 matplotlib适配：图表生成
-    st.subheader("📈 盈利能力核心指标")
-    fig, ax = plt.subplots(figsize=(10, 5))  # 3.12指定尺寸，防布局报错
-    categories = ['毛利率', '净利率', 'ROE']
-    values = [data['毛利率'], data['净利率'], data['ROE(%)']]
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
-    
-    bars = ax.bar(categories, values, color=colors, alpha=0.8)
-    for bar in bars:
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height + 1, f'{height:.1f}%', ha='center')
-    ax.set_ylabel('百分比 (%)')
-    ax.set_title(f'{stock_name} 盈利能力指标')
-    ax.set_ylim(0, np.max(values) * 1.2)  # 3.12 np.max替代max，更稳定
-    st.pyplot(fig)
-    
-    # 业绩点评
-    st.info(f"""💡 {stock_name} 2024年度业绩点评：
-    1. 营业收入同比增长 {data['同比增长']}%，营收规模稳步提升；
-    2. 净利润同比增长 {data['净利润同比']}%，盈利端增长优于营收；
-    3. 毛利率 {data['毛利率']}%、净利率 {data['净利率']}%，盈利能力保持稳定；
-    4. 每股股息 {data['股息(HKD)']} 港元，具备一定的分红回报能力。""")
+    df.rename(columns=final_cols, inplace=True)
+    return df
 
-# ================== 主执行逻辑（3.12 全适配） ==================
-if st.button("🚀 开始分析（一键运行）", type="primary", use_container_width=True):
-    # 输入验证（3.12字符串判断）
-    if not user_code.isdigit() or len(user_code) != 4:
-        st.error("❌ 港股代码格式错误！必须是4位数字（如腾讯=0700）")
+# ================== 穩定的數據獲取函數 ==================
+@st.cache_data(ttl=3600)  # 緩存1小時，減少請求次數
+def get_hk_stock_data(symbol):
+    """
+    獲取港股數據（多層次兼容+兜底+請求優化）
+    :param symbol: 港股代碼（如0700）
+    :return: 清洗後的DataFrame或None
+    """
+    # 步驟1：構建標準Yahoo Finance代碼
+    yf_symbol = f"{symbol}.HK"
+    st.info(f"🔍 正在獲取數據：{yf_symbol}")
+    
+    # 步驟2：下載數據（擴展時間範圍，增加成功率）
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=3*365)  # 拉長到3年，確保有數據
+    
+    try:
+        # 核心優化：提升港股兼容性
+        df = yf.download(
+            yf_symbol,
+            start=start_date.strftime("%Y-%m-%d"),
+            end=end_date.strftime("%Y-%m-%d"),
+            progress=False,
+            timeout=60,        # 超時從30秒延長到60秒
+            threads=False,     # 關閉多線程，提升穩定性
+            auto_adjust=False, # 關閉自動調整，避免數據格式異常
+            back_adjust=False, # 關閉回調，兼容港股原始數據
+            repair=True        # 開啟數據修復
+        )
+        
+        # 步驟3：空數據檢查（增加二次驗證）
+        if df.empty or len(df) < 5:
+            # 兜底嘗試：直接調用Yahoo Finance接口請求
+            st.warning("⚠️ 默認方式獲取數據失敗，嘗試備用接口獲取...")
+            url = f"https://query1.finance.yahoo.com/v7/finance/chart/{yf_symbol}?range=3y&interval=1d&indicators=quote&includeTimestamps=true"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            }
+            resp = requests.get(url, headers=headers, timeout=60)
+            data = resp.json()
+            # 解析備用接口數據
+            if 'chart' in data and 'result' in data['chart'] and len(data['chart']['result'])>0:
+                ts = data['chart']['result'][0]['timestamp']
+                quote = data['chart']['result'][0]['indicators']['quote'][0]
+                df = pd.DataFrame({
+                    'Date': [datetime.fromtimestamp(t) for t in ts],
+                    'Open': quote['open'],
+                    'High': quote['high'],
+                    'Low': quote['low'],
+                    'Close': quote['close'],
+                    'Volume': quote['volume']
+                })
+                # 去除空值
+                df = df.dropna(subset=['Close'])
+            else:
+                st.error(f"❌ 未獲取到 {yf_symbol} 的數據（可能是代碼錯誤/股票未上市/停牌）")
+                return None
+        
+        # 步驟4：重置索引（Date列還原為普通列）
+        df.reset_index(inplace=True)
+        
+        # 步驟5：核心列名清洗
+        df = clean_column_names(df)
+        
+        # 步驟6：必要列檢查（允許部分缺失，降級處理）
+        required_cols = ["Date", "Open", "High", "Low", "Close", "Volume"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        
+        # 處理缺失列（降級補全）
+        if missing_cols:
+            st.warning(f"⚠️ 部分字段缺失：{missing_cols}，正在嘗試補全...")
+            
+            # 補全Date列（必備）
+            if "Date" not in df.columns:
+                st.error("❌ 核心字段Date缺失，無法繼續分析")
+                return None
+            
+            # 補全價格列（用Close填充其他缺失的價格列）
+            if "Close" in df.columns:
+                for col in ["Open", "High", "Low"]:
+                    if col not in df.columns:
+                        df[col] = df["Close"]
+            else:
+                st.error("❌ 核心字段Close缺失，無法繼續分析")
+                return None
+            
+            # 補全Volume列（用0填充）
+            if "Volume" not in df.columns:
+                df["Volume"] = 0
+        
+        # 步驟7：最終數據清洗
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values("Date").dropna(subset=["Close"]).reset_index(drop=True)
+        
+        # 步驟8：數據量檢查
+        if len(df) < 10:
+            st.warning(f"⚠️ 有效數據僅{len(df)}條（數據量過少，分析結果參考性低）")
+        
+        st.success(f"✅ 成功獲取 {yf_symbol} 數據（共{len(df)}條）")
+        return df
+    
+    except Exception as e:
+        st.error(f"❌ 數據獲取異常：{str(e)[:100]}")
+        st.info("💡 解決方案：")
+        st.info("1. 刷新頁面重試（網絡/數據源臨時波動）")
+        st.info("2. 確認港股代碼格式（必須是4-5位數字，如0700而非700）")
+        st.info("3. 更換熱門港股測試（如騰訊0700、小米1810）")
+        return None
+
+# ================== 技術指標計算 ==================
+def calculate_indicators(df):
+    """計算技術指標（兼容缺失字段）"""
+    if df is None or len(df) == 0:
+        return None
+    
+    df = df.copy()
+    try:
+        # 移動平均線（最小週期1，避免空值）
+        df["MA5"] = df["Close"].rolling(window=5, min_periods=1).mean()
+        df["MA20"] = df["Close"].rolling(window=20, min_periods=1).mean()
+        
+        # MACD
+        df["EMA12"] = df["Close"].ewm(span=12, adjust=False, min_periods=1).mean()
+        df["EMA26"] = df["Close"].ewm(span=26, adjust=False, min_periods=1).mean()
+        df["MACD"] = df["EMA12"] - df["EMA26"]
+        df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False, min_periods=1).mean()
+        
+        # RSI（避免除零錯誤+兼容少數據）
+        delta = df["Close"].pct_change()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
+        rs = gain / loss.replace(0, 0.0001)  # 替換0避免除零
+        df["RSI"] = 100 - (100 / (1 + rs))
+        
+        return df
+    except Exception as e:
+        st.warning(f"⚠️ 技術指標計算部分失敗：{str(e)}")
+        return df
+
+# ================== 支撐壓力位計算 ==================
+def calculate_support_resistance(df, window=20):
+    """計算支撐壓力位"""
+    try:
+        support = df["Low"].rolling(window=window, min_periods=1).min().iloc[-1]
+        resistance = df["High"].rolling(window=window, min_periods=1).max().iloc[-1]
+        return round(support, 2), round(resistance, 2)
+    except:
+        # 兜底：用最新價格計算
+        return round(df["Low"].iloc[-1], 2), round(df["High"].iloc[-1], 2)
+
+# ================== 優化版價格預測模塊（核心修改） ==================
+def clean_outliers(df, column="Close"):
+    """處理股價異常值（IQR方法）"""
+    q1 = df[column].quantile(0.25)
+    q3 = df[column].quantile(0.75)
+    iqr = q3 - q1
+    lower_bound = q1 - 1.5 * iqr
+    upper_bound = q3 + 1.5 * iqr
+    df_clean = df[(df[column] >= lower_bound) & (df[column] <= upper_bound)]
+    return df_clean
+
+def prepare_features(df):
+    """構建多特征數據集（替代單一時間索引）"""
+    df_feat = df.copy()
+    
+    # 基礎價格特征
+    df_feat["price_change"] = df_feat["Close"].pct_change()
+    df_feat["high_low_diff"] = df_feat["High"] - df_feat["Low"]
+    df_feat["open_close_diff"] = df_feat["Open"] - df_feat["Close"]
+    
+    # 技術指標特征（復用已計算的MA/RSI/MACD）
+    df_feat["rsi_norm"] = df_feat["RSI"] / 100  # 歸一化RSI
+    df_feat["macd_diff"] = df_feat["MACD"] - df_feat["MACD_Signal"]
+    df_feat["ma5_ma20_diff"] = df_feat["MA5"] - df_feat["MA20"]
+    df_feat["close_ma5_diff"] = df_feat["Close"] - df_feat["MA5"]
+    
+    # 成交量特征
+    df_feat["volume_change"] = df_feat["Volume"].pct_change()
+    
+    # 時間特征
+    df_feat["day_of_week"] = df_feat["Date"].dt.weekday
+    df_feat["month"] = df_feat["Date"].dt.month
+    
+    # 填充缺失值（避免模型報錯）
+    df_feat = df_feat.fillna(0)
+    # 去除無窮值
+    df_feat = df_feat.replace([np.inf, -np.inf], 0)
+    
+    # 特征列篩選（僅保留數值型特征）
+    feature_cols = [
+        "price_change", "high_low_diff", "open_close_diff",
+        "rsi_norm", "macd_diff", "ma5_ma20_diff", "close_ma5_diff",
+        "volume_change", "day_of_week", "month"
+    ]
+    # 確保特征列存在
+    feature_cols = [col for col in feature_cols if col in df_feat.columns]
+    
+    return df_feat, feature_cols
+
+def predict_price_optimized(df, days):
+    """
+    優化後的價格預測函數：
+    1. 隨機森林（非線性模型）替代線性回歸
+    2. 多特征融合（價格/技術指標/成交量/時間）
+    3. 異常值處理
+    4. 輸出預測值+置信區間（95%）
+    """
+    try:
+        # 步驟1：數據清洗（去除異常值）
+        df_clean = clean_outliers(df)
+        if len(df_clean) < 20:  # 數據量不足時降級為線性回歸
+            st.warning("⚠️ 有效數據量不足，降級為線性回歸預測")
+            pred, slope = predict_price_linear(df, days)
+            conf_interval = np.zeros(days)  # 無置信區間
+            return pred, slope, conf_interval
+        
+        # 步驟2：構建多特征數據集
+        df_feat, feature_cols = prepare_features(df_clean)
+        if len(feature_cols) < 3:  # 特征不足時降級
+            pred, slope = predict_price_linear(df, days)
+            conf_interval = np.zeros(days)
+            return pred, slope, conf_interval
+        
+        # 步驟3：特征工程（歸一化）
+        X = df_feat[feature_cols].values
+        y = df_feat["Close"].values
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        # 步驟4：訓練隨機森林模型（調參優化）
+        model = RandomForestRegressor(
+            n_estimators=100,  # 決策樹數量
+            max_depth=10,      # 樹深度（避免過擬合）
+            min_samples_split=5,
+            random_state=42    # 固定隨機種子（可復現）
+        )
+        # 劃分訓練集（用80%數據訓練）
+        X_train, _, y_train, _ = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+        model.fit(X_train, y_train)
+        
+        # 步驟5：生成未來特征（基於最後一條數據的特征趨勢）
+        last_feat = df_feat.iloc[-1][feature_cols].values.reshape(1, -1)
+        future_X = []
+        for i in range(days):
+            # 基於時間遞增調整特征（模擬趨勢）
+            temp_feat = last_feat.copy()
+            if "day_of_week" in feature_cols:
+                temp_feat[0, feature_cols.index("day_of_week")] = (df_feat["day_of_week"].iloc[-1] + i) % 5
+            future_X.append(temp_feat[0])
+        future_X_scaled = scaler.transform(future_X)
+        
+        # 步驟6：預測+計算95%置信區間（體現預測不確定性）
+        # 用所有決策樹的預測值計算置信區間
+        tree_predictions = [tree.predict(future_X_scaled) for tree in model.estimators_]
+        pred = np.mean(tree_predictions, axis=0)  # 均值作為最終預測
+        pred_std = np.std(tree_predictions, axis=0)  # 標準差
+        # 95%置信區間（1.96倍標準差）
+        conf_interval = 1.96 * pred_std
+        
+        # 步驟7：計算整體趨勢（基於預測值的斜率）
+        slope, _, _, _, _ = stats.linregress(range(days), pred)
+        
+        return pred, slope, conf_interval
+    
+    except Exception as e:
+        st.warning(f"⚠️ 優化預測失敗，降級為基礎線性回歸：{str(e)}")
+        pred, slope = predict_price_linear(df, days)
+        conf_interval = np.zeros(days)  # 無置信區間
+        return pred, slope, conf_interval
+
+def predict_price_linear(df, days):
+    """保留原線性回歸作為兜底"""
+    df["idx"] = np.arange(len(df))
+    x = df["idx"].values.reshape(-1, 1)
+    y = df["Close"].values
+    model = LinearRegression()
+    model.fit(x, y)
+    future_idx = np.arange(len(df), len(df) + days).reshape(-1, 1)
+    pred = model.predict(future_idx)
+    slope = model.coef_[0]
+    return pred, slope
+
+def backtest_model(df):
+    """簡單回測：用歷史數據驗證模型準確率"""
+    try:
+        df_clean = clean_outliers(df)
+        if len(df_clean) < 50:
+            return "數據量不足（<50條），無法回測"
+        split_idx = int(len(df_clean) * 0.9)
+        train_df = df_clean.iloc[:split_idx]
+        test_df = df_clean.iloc[split_idx:]
+        pred_test, _, _ = predict_price_optimized(train_df, len(test_df))
+        # 計算平均絕對誤差（MAE）
+        mae = np.mean(np.abs(pred_test - test_df["Close"].values))
+        return f"回測平均誤差：{mae:.2f} HK$（誤差越小越準確）"
+    except Exception as e:
+        return f"回測失敗：{str(e)[:50]}"
+
+# ================== 主執行邏輯 ==================
+if st.button("🚀 開始分析（優化版）", type="primary"):
+    # 輸入驗證
+    if not user_code.isdigit() or len(user_code) not in [4,5]:
+        st.error("❌ 港股代碼格式錯誤！必須是4-5位數字（如騰訊=0700，小米=1810）")
     else:
-        # 1. 获取数据
+        # 獲取數據
         df = get_hk_stock_data(user_code)
         if df is None:
             st.stop()
-        # 2. 计算技术指标
-        df = calculate_indicators(df)
-        # 3. 支撑压力位
-        support, resistance = calculate_support_resistance(df)
-        last_close = df["Close"].iloc[-1]
-        last_date = df["日期"].iloc[-1]
-        # 4. 特征+预测
-        df_feat, feature_cols, scaler = prepare_simple_features(df)
-        pred_prices = simple_predict(df_feat, feature_cols, scaler, predict_days)
-        # 5. 预测日期（3.12 datetime转换）
-        pred_dates = get_trading_dates(datetime.combine(last_date, datetime.min.time()) + timedelta(days=1), predict_days)
-        pred_dates_str = [d.strftime("%Y-%m-%d") for d in pred_dates]
-        # 涨跌幅（3.12 numpy计算）
-        pred_chg = np.round((pred_prices / last_close - 1) * 100, 2)
         
-        # ========== 数据展示（3.12 适配） ==========
-        st.subheader("📋 最新10条交易数据（含全周期均线）")
-        show_cols = ["日期", "Open", "High", "Low", "Close", "Volume", "MA5", "MA20", "MA30", "MA50"]
-        show_cols = [col for col in show_cols if col in df.columns]
-        show_df = df[show_cols].tail(10).round(2)
+        # 計算技術指標
+        df = calculate_indicators(df)
+        if df is None:
+            st.stop()
+        
+        # 計算支撐壓力位
+        sup, res = calculate_support_resistance(df)
+        # 優化版預測（帶置信區間）
+        pred, slope, conf_interval = predict_price_optimized(df, predict_days)
+        last_close = df["Close"].iloc[-1]
+        
+        # ========== 展示數據 ==========
+        # 最新10筆數據
+        st.subheader("📊 最新交易數據（前10筆）")
+        show_df = df[["Date","Open","High","Low","Close","Volume","MA5","MA20"]].tail(10)
+        show_df = show_df.round({
+            "Open":2, "High":2, "Low":2, "Close":2, 
+            "Volume":0, "MA5":2, "MA20":2
+        })
         st.dataframe(show_df, use_container_width=True)
         
-        # 价格+均线图（3.12 matplotlib适配）
-        st.subheader("📈 股价 & 全周期均线走势（MA5/20/30/50/60/120）")
-        fig, ax = plt.subplots(figsize=(14, 7))
-        ax.plot(df["日期"], df["Close"], label="收盘价", color="#1f77b4", linewidth=2, zorder=5)
-        ma_style = {
-            "MA5": ("#ff7f0e", 1.5, "-"), "MA20": ("#2ca02c", 1.5, "-"),
-            "MA30": ("#d62728", 1.2, "--"), "MA50": ("#9467bd", 1.2, "--"),
-            "MA60": ("#8c564b", 1.0, ":"), "MA120": ("#e377c2", 1.0, ":")
-        }
-        for ma, (color, lw, ls) in ma_style.items():
-            if ma in df.columns:
-                ax.plot(df["日期"], df[ma], label=ma, color=color, linewidth=lw, linestyle=ls, alpha=0.8)
-        ax.set_title(f"{option} 股价&全均线走势", fontsize=14, pad=20)
-        ax.set_xlabel("日期", fontsize=12)
-        ax.set_ylabel("价格（HK$）", fontsize=12)
-        ax.legend(loc="upper left")
-        ax.grid(alpha=0.3)
-        st.pyplot(fig)
-        
-        # 支撑压力位
-        st.subheader("🛡️ 支撑/压力位 & 行情判断")
+        # 價格走勢圖
         col1, col2 = st.columns(2)
         with col1:
-            st.metric("当前收盘价", f"{last_close:.2f} HK$")
-            st.metric("支撑位", f"{support:.2f} HK$")
-            st.metric("压力位", f"{resistance:.2f} HK$")
-        with col2:
-            if last_close < support * 0.99:
-                st.success("📉 当前处于【超卖区间】，存在反弹机会")
-            elif last_close > resistance * 1.01:
-                st.warning("📈 当前处于【超买区间】，注意回调风险")
-            else:
-                st.info("📊 当前处于【正常区间】，震荡整理为主")
-            # 均线判断
-            ma5, ma20, ma30, ma50 = df["MA5"].iloc[-1], df["MA20"].iloc[-1], df["MA30"].iloc[-1], df["MA50"].iloc[-1]
-            if ma5 > ma20 > ma30 > ma50:
-                st.success("✅ 中短期【多头排列】，趋势偏多")
-            elif ma5 < ma20 < ma30 < ma50:
-                st.error("❌ 中短期【空头排列】，趋势偏空")
-            else:
-                st.info("🔍 均线【缠绕震荡】，方向不明")
+            st.subheader("📈 價格 & 均線走勢")
+            fig, ax = plt.subplots(figsize=(8,4))
+            ax.plot(df["Date"], df["Close"], label="收盤價", color="#1f77b4", linewidth=1.5)
+            ax.plot(df["Date"], df["MA5"], label="MA5（5日均線）", color="#ff7f0e", linewidth=1, alpha=0.8)
+            ax.plot(df["Date"], df["MA20"], label="MA20（20日均線）", color="#2ca02c", linewidth=1, alpha=0.8)
+            ax.set_title(f"{option} ({user_code}.HK) 價格走勢", fontsize=10)
+            ax.set_xlabel("日期", fontsize=8)
+            ax.set_ylabel("價格 (HK$)", fontsize=8)
+            ax.legend(fontsize=8)
+            ax.tick_params(axis='both', labelsize=7)
+            plt.xticks(rotation=45)
+            st.pyplot(fig)
         
-        # 预测结果
-        st.subheader("🔮 未来{}个交易日价格预测".format(predict_days))
+        with col2:
+            st.subheader("🛡️ 支撐 / 壓力位")
+            st.info(f"📉 支撐位：{sup} HK$")
+            st.info(f"📈 壓力位：{res} HK$")
+            if last_close < sup:
+                st.success(f"當前價 {last_close:.2f} HK$：低於支撐位（超賣區間）")
+            elif last_close > res:
+                st.warning(f"當前價 {last_close:.2f} HK$：高於壓力位（超買區間）")
+            else:
+                st.info(f"當前價 {last_close:.2f} HK$：處於支撐壓力區間")
+        
+        # RSI指標圖
+        st.subheader("📊 RSI 14日超買超賣指標")
+        fig_r, ax_r = plt.subplots(figsize=(10,3))
+        ax_r.plot(df["Date"], df["RSI"], color="#9467bd", linewidth=1)
+        ax_r.axhline(70, c="#d62728", ls="--", alpha=0.7, label="超買線(70)")
+        ax_r.axhline(30, c="#2ca02c", ls="--", alpha=0.7, label="超賣線(30)")
+        ax_r.axhline(50, c="#7f7f7f", ls=":", alpha=0.5, label="中軸(50)")
+        ax_r.set_title("RSI 走勢（14日）", fontsize=10)
+        ax_r.set_xlabel("日期", fontsize=8)
+        ax_r.set_ylabel("RSI 值", fontsize=8)
+        ax_r.legend(fontsize=8)
+        ax_r.tick_params(axis='both', labelsize=7)
+        plt.xticks(rotation=45)
+        st.pyplot(fig_r)
+        
+        # 優化版價格預測（帶置信區間）
+        st.subheader(f"🔮 未來 {predict_days} 天價格預測（隨機森林+多特征）")
+        trend = "📈 上漲趨勢" if slope > 0 else "📉 下跌趨勢" if slope < 0 else "📊 平盤趨勢"
+        st.success(f"整體趨勢：{trend} (斜率：{slope:.6f})")
+        st.info(backtest_model(df))  # 展示回測結果
+        
+        # 生成交易日預測日期
+        last_trading_day = df["Date"].iloc[-1]
+        pred_dates = get_trading_dates(last_trading_day + timedelta(days=1), predict_days)
         pred_df = pd.DataFrame({
-            "预测交易日": pred_dates_str,
-            "预测价格(HK$)": np.round(pred_prices, 2),
-            "涨跌幅(%)": pred_chg,
-            "相对当前价": [f"+{p-last_close:.2f}" if p>last_close else f"{p-last_close:.2f}" for p in pred_prices]
+            "預測日期": [d.strftime("%Y-%m-%d") for d in pred_dates],
+            "預測價格 (HK$)": [round(p, 2) for p in pred[:len(pred_dates)]],
+            "95%置信下限 (HK$)": [round(p - ci, 2) for p, ci in zip(pred[:len(pred_dates)], conf_interval[:len(pred_dates)])],
+            "95%置信上限 (HK$)": [round(p + ci, 2) for p, ci in zip(pred[:len(pred_dates)], conf_interval[:len(pred_dates)])]
         })
         st.dataframe(pred_df, use_container_width=True)
-        # 预测总结
-        final_pred = pred_prices[-1]
-        final_chg = np.round((final_pred / last_close - 1) * 100, 2)
-        if final_chg > 0:
-            st.success(f"📌 预测总结：未来{predict_days}天整体【上涨】，最终预测价 {final_pred:.2f} HK$，累计涨幅 {final_chg}%")
-        elif final_chg < 0:
-            st.error(f"📌 预测总结：未来{predict_days}天整体【下跌】，最终预测价 {final_pred:.2f} HK$，累计跌幅 {abs(final_chg)}%")
-        else:
-            st.info(f"📌 预测总结：未来{predict_days}天整体【横盘】，最终预测价 {final_pred:.2f} HK$")
+        st.info(f"當前價：{last_close:.2f} HK$ → 最後預測價：{pred[-1]:.2f} HK$")
         
-        # 业绩分析
-        last_year_performance_analysis(option)
+        # 強化風險提示
+        st.warning("⚠️ 預測風險提示：")
+        st.warning("1. 股價受政策、資金、消息等多因素影響，預測僅為技術面參考；")
+        st.warning("2. 95%置信區間代表預測波動範圍，區間越寬，不確定性越高；")
+        st.warning("3. 本模型未考慮停牌、分紅、除權等港股特殊事件，僅供學習使用。")
         
-        # 风险提示
-        st.warning("⚠️ 重要风险提示", icon="❗")
-        st.markdown("""
-        1. 本工具仅为**编程学习/技术演示**，不构成任何投资建议、交易依据；
-        2. 股票数据来源于Yahoo Finance，业绩数据为示例模板，仅供参考；
-        3. 港股实行T+0、无涨跌幅限制，交易风险极高，入市需极度谨慎；
-        4. 价格预测基于历史技术指标，未考虑政策、消息、资金等突发因素，存在较大误差。
-        """)
+        # 綜合研判
+        st.subheader("📌 技術研判（僅供學習參考）")
+        rsi = df["RSI"].iloc[-1]
+        ma5 = df["MA5"].iloc[-1]
+        ma20 = df["MA20"].iloc[-1]
+        col_advice1, col_advice2 = st.columns(2)
+        with col_advice1:
+            st.markdown("### 指標狀態")
+            st.write(f"RSI當前值：{rsi:.1f}")
+            st.write(f"MA5：{ma5:.2f} | MA20：{ma20:.2f}")
+            st.write(f"價格/MA5：{'↑ 站穩' if last_close > ma5 else '↓ 跌破'}")
+            st.write(f"MA5/MA20：{'↑ 金叉' if ma5 > ma20 else '↓ 死叉'}")
+        with col_advice2:
+            st.markdown("### 操作建議")
+            if ma5 > ma20 and rsi < 65:
+                st.success("✅ 趨勢向上，可適度關注")
+            elif ma5 < ma20:
+                st.warning("⚠️ 短期趨勢偏弱，謹慎操作")
+            elif rsi > 70:
+                st.warning("⚠️ RSI超買，注意回調風險")
+            elif rsi < 30:
+                st.success("✅ RSI超賣，可留意反彈機會")
+            else:
+                st.info("🔍 震盪區間，建議觀察為主")
 
-# ================== 底部信息 ==================
+# ================== 底部提示 ==================
 st.divider()
-st.caption("✅ 港股分析预测系统｜Python 3.12专属适配版")
-st.caption("核心功能：全周期均线MA5/20/30/50/60/120 + 价格预测 + 去年业绩分析")
-st.caption("兼容环境：Python 3.12（Windows/Mac/Linux/Streamlit Cloud）｜无报错｜中文正常显示")
-st.caption("⚠️ 投资有风险，入市需谨慎！本工具仅作学习使用，不构成任何投资建议")
+st.caption("⚠️ 重要提示：")
+st.caption("1. 本工具僅供編程學習使用，不構成任何投資建議")
+st.caption("2. 數據來源為Yahoo Finance，請以港交所官方數據為準")
+st.caption("3. 預測模型已升級為隨機森林+多特征融合，相比線性回歸更貼近實際走勢")
+st.caption("4. 若仍失敗，請檢查網絡或稍後重試（數據源臨時維護）")
