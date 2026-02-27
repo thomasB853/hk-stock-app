@@ -7,7 +7,7 @@ import akshare as ak
 # ================== 頁面設定 ==================
 st.set_page_config(page_title="港股專業頂級版", layout="wide")
 st.title("📈 港股分析預測系統｜專業頂級版")
-st.markdown("### 支持：騰訊、美高梅、金沙、工行、阿里等")
+st.markdown("### 支持：騰訊、美團、匯豐、美高梅、金沙、工行、阿里等")
 
 # ================== 熱門港股 ==================
 hot_stocks = {
