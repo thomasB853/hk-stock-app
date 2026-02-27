@@ -5,35 +5,27 @@ import matplotlib.pyplot as plt
 import warnings
 from datetime import datetime, timedelta
 import requests
-import json
 import subprocess
 import sys
 import importlib
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split, GridSearchCV
 from scipy import stats
 import matplotlib as mpl
-# LSTM时序模型依赖
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping
-import tensorflow as tf
 
-# ================== 全局配置（彻底解决中文显示+TensorFlow优化） ==================
+# ================== 全局配置（彻底解决中文显示） ==================
 warnings.filterwarnings('ignore')
 st.set_page_config(page_title="港股專業頂級版", layout="wide")
+
 # 彻底解决matplotlib中文显示（兼容所有系统/Streamlit Cloud）
-plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei', 'SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 mpl.rcParams['font.family'] = 'sans-serif'
 mpl.rcParams['figure.autolayout'] = True  # 自动适配布局，防止标签截断
-# TensorFlow显存优化（避免显存溢出）
-tf.config.set_soft_device_placement(True)
-tf.config.experimental.set_memory_growth(tf.config.list_physical_devices('GPU')[0] if tf.config.list_physical_devices('GPU') else tf.config.list_physical_devices('CPU')[0], True)
 
-# ================== 依赖检查&强制升级（新增TensorFlow） ==================
+# ================== 依赖检查&强制升级 ==================
 def install_package(pkg_name, pkg_version=""):
     """统一安装/升级依赖函数"""
     cmd = [sys.executable, "-m", "pip", "install"]
@@ -63,18 +55,10 @@ except ImportError:
     install_package("scikit-learn", "1.3.0")
     from sklearn.linear_model import LinearRegression
 
-# 检查TensorFlow（LSTM依赖）
-try:
-    import tensorflow as tf
-except ImportError:
-    st.warning("⚠️ 缺少TensorFlow庫，正在安裝（LSTM模型依赖）...")
-    install_package("tensorflow", "2.15.0")
-    import tensorflow as tf
-
 # ================== 页面UI ==================
 st.title("📈 港股分析預測系統｜超精準版")
 st.markdown("### 多模型融合预测+全周期均線（MA5/20/30/50/60/120）｜支持騰訊/美團/匯豐等主流港股")
-st.markdown("#### 核心模型：LSTM时序模型+随机森林+增强线性回归｜多特征融合+时序趋势挖掘")
+st.markdown("#### 核心模型：隨機森林+增強線性回歸｜多特征融合+時序趨勢挖掘")
 
 # 热门港股
 hot_stocks = {
@@ -91,8 +75,8 @@ option = st.selectbox("選擇熱門港股（數據穩定）", list(hot_stocks.ke
 default_code = hot_stocks[option]
 user_code = st.text_input("手動輸入港股代碼（4-5位數字，如0700）", default_code).strip()
 predict_days = st.slider("預測天數（1-15天）", 1, 15, 5)
-# 新增模型选择（让用户可选单模型/融合模型）
-model_choice = st.radio("選擇預測模型", ["多模型融合（最精準）", "LSTM時序模型（短期趨勢）", "隨機森林（多特征）"], index=0)
+# 新增模型选择
+model_choice = st.radio("選擇預測模型", ["多模型融合（最精準）", "隨機森林（多特征）", "增強線性回歸"], index=0)
 
 # ================== 核心工具函數 ==================
 def is_trading_day(date):
@@ -335,48 +319,6 @@ def prepare_features(df):
     df_feat[feature_cols] = scaler.fit_transform(df_feat[feature_cols])
     return df_feat, feature_cols, scaler
 
-# ================== LSTM时序模型（短期趋势预测核心，适配股价时序特性） ==================
-def create_lstm_model(input_shape):
-    """构建LSTM模型：适配股价时序预测，防止过拟合"""
-    model = Sequential()
-    model.add(LSTM(units=64, return_sequences=True, input_shape=input_shape, dropout=0.2, recurrent_dropout=0.2))
-    model.add(LSTM(units=32, return_sequences=False, dropout=0.2, recurrent_dropout=0.2))
-    model.add(Dense(units=16, activation='relu'))
-    model.add(Dropout(0.2))
-    model.add(Dense(units=1))
-    # 编译模型
-    model.compile(optimizer='adam', loss='mean_squared_error')
-    return model
-
-def lstm_predict(df, predict_days, seq_len=60):
-    """LSTM时序预测：基于历史价格序列预测未来价格"""
-    # 数据准备：仅用收盘价（时序模型核心），归一化
-    data = df[["Close"]].values
-    scaler = MinMaxScaler(feature_range=(0,1))
-    data_scaled = scaler.fit_transform(data)
-    # 构建时序序列
-    X = []
-    for i in range(seq_len, len(data_scaled)):
-        X.append(data_scaled[i-seq_len:i, 0])
-    X = np.array(X)
-    X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-    # 训练LSTM模型
-    model = create_lstm_model((X.shape[1], 1))
-    early_stop = EarlyStopping(monitor='loss', patience=5, restore_best_weights=True)
-    model.fit(X, data_scaled[seq_len:], batch_size=32, epochs=20, callbacks=[early_stop], verbose=0)
-    # 预测未来：基于最后seq_len个数据迭代预测
-    last_seq = data_scaled[-seq_len:]
-    lstm_pred = []
-    for _ in range(predict_days):
-        last_seq_reshaped = np.reshape(last_seq, (1, seq_len, 1))
-        pred = model.predict(last_seq_reshaped, verbose=0)
-        lstm_pred.append(pred[0,0])
-        # 更新序列：滑动窗口
-        last_seq = np.append(last_seq[1:], pred, axis=0)
-    # 反归一化，还原真实价格
-    lstm_pred = scaler.inverse_transform(np.array(lstm_pred).reshape(-1,1)).flatten()
-    return lstm_pred
-
 # ================== 随机森林模型（超参调优+多特征融合） ==================
 def rf_predict(df, feature_cols, predict_days, scaler):
     """随机森林预测：超参调优+多特征融合，捕捉特征间非线性关系"""
@@ -427,16 +369,15 @@ def lr_predict(df, feature_cols, predict_days):
     lr_pred = lr.predict(future_feat)
     return lr_pred
 
-# ================== 多模型融合预测（核心：加权融合LSTM+RF+LR，最精準） ==================
+# ================== 多模型融合预测（核心：加权融合RF+LR，最精準） ==================
 def ensemble_predict(df, feature_cols, scaler, predict_days):
-    """多模型加权融合：LSTM(0.5)+随机森林(0.3)+线性回归(0.2)，兼顾时序/特征/线性趋势"""
+    """多模型加权融合：隨機森林(0.7)+線性回歸(0.3)，兼顾特征/线性趋势"""
     try:
         # 分别获取各模型预测结果
-        lstm_pred = lstm_predict(df, predict_days)
         rf_pred = rf_predict(df, feature_cols, predict_days, scaler)
         lr_pred = lr_predict(df, feature_cols, predict_days)
-        # 加权融合（LSTM权重最高，因为股价是时序数据）
-        ensemble_pred = 0.5 * lstm_pred + 0.3 * rf_pred + 0.2 * lr_pred
+        # 加权融合（随机森林权重更高，因为能捕捉非线性关系）
+        ensemble_pred = 0.7 * rf_pred + 0.3 * lr_pred
         # 趋势修正：基于均線趋势调整预测值（避免偏离实际趋势）
         ma60 = df["MA60"].iloc[-1]
         ma120 = df["MA120"].iloc[-1]
@@ -445,11 +386,11 @@ def ensemble_predict(df, feature_cols, scaler, predict_days):
         # 上下限修正：不低于支撑位，不高于压力位
         sup, res = calculate_support_resistance(df)
         ensemble_pred = np.clip(ensemble_pred, sup * 0.95, res * 1.05)
-        return ensemble_pred, lstm_pred, rf_pred, lr_pred
+        return ensemble_pred, rf_pred, lr_pred
     except Exception as e:
-        st.warning(f"⚠️ 多模型融合失敗，切換為LSTM單模型：{str(e)[:80]}")
-        lstm_pred = lstm_predict(df, predict_days)
-        return lstm_pred, lstm_pred, lstm_pred, lstm_pred
+        st.warning(f"⚠️ 多模型融合失敗，切換為隨機森林單模型：{str(e)[:80]}")
+        rf_pred = rf_predict(df, feature_cols, predict_days, scaler)
+        return rf_pred, rf_pred, rf_pred
 
 # ================== 回测函数（多维度评估：MAE/MAPE/R²/胜率，精准判断模型效果） ==================
 def backtest(df, feature_cols, scaler, predict_days=5):
@@ -466,7 +407,7 @@ def backtest(df, feature_cols, scaler, predict_days=5):
         if len(test_df) < predict_days:
             return f"📊 測試集數據不足（僅{len(test_df)}條），無法回測"
         # 融合模型预测
-        pred, _, _, _ = ensemble_predict(train_df, feature_cols, scaler, len(test_df))
+        pred, _, _ = ensemble_predict(train_df, feature_cols, scaler, len(test_df))
         actual = test_df["Close"].values
         # 计算多维度评估指标
         mae = round(np.mean(np.abs(pred - actual)), 2)  # 平均绝对误差
@@ -486,6 +427,90 @@ def backtest(df, feature_cols, scaler, predict_days=5):
         )
     except Exception as e:
         return f"📊 回測失敗：{str(e)[:60]}"
+
+# ================== 新增：去年业绩分析函数 ==================
+@st.cache_data(ttl=3600)
+def get_last_year_financials(symbol):
+    """
+    获取并分析去年的财务业绩（模拟数据，可对接真实API）
+    注意：实际应用中可对接Tushare、雪球等API获取真实财务数据
+    """
+    yf_symbol = f"{symbol}.HK"
+    st.info(f"📊 正在獲取{yf_symbol}去年業績數據...")
+    
+    # 模拟财务数据（示例：腾讯控股2024年）
+    # 实际应用中，可替换为API调用
+    financial_data = {
+        "營業收入(億港元)": 5560.0,
+        "毛利(億港元)": 2850.0,
+        "淨利潤(億港元)": 1350.0,
+        "每股收益(HKD)": 14.20,
+        "股息(HKD)": 4.80,
+        "研發投入(億港元)": 480.0,
+        "自由現金流(億港元)": 1520.0,
+        "淨負債率(%)": 12.5,
+        "ROE(%)": 22.3,
+        "毛利率(%)": 51.3,
+        "淨利率(%)": 24.3
+    }
+    
+    # 同比增长数据（模拟）
+    yoy_growth = {
+        "營業收入同比": 8.2,
+        "淨利潤同比": 15.6,
+        "每股收益同比": 14.8,
+        "研發投入同比": 12.1
+    }
+    
+    return financial_data, yoy_growth
+
+def analyze_last_year_performance(symbol):
+    """分析去年业绩并可视化"""
+    financials, yoy = get_last_year_financials(symbol)
+    
+    st.subheader("📊 去年業績分析（示例數據）")
+    
+    # 1. 核心财务指标
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("營業收入", f"{financials['營業收入(億港元)']} 億HKD", f"{yoy['營業收入同比']}%")
+        st.metric("淨利潤", f"{financials['淨利潤(億港元)']} 億HKD", f"{yoy['淨利潤同比']}%")
+    with col2:
+        st.metric("每股收益", f"{financials['每股收益(HKD)']} HKD", f"{yoy['每股收益同比']}%")
+        st.metric("股息", f"{financials['股息(HKD)']} HKD")
+    with col3:
+        st.metric("ROE", f"{financials['ROE(%)']}%")
+        st.metric("淨負債率", f"{financials['淨負債率(%)']}%")
+    
+    # 2. 盈利能力分析
+    st.subheader("盈利能力分析")
+    fig, ax = plt.subplots(figsize=(10, 5))
+    categories = ['毛利率', '淨利率', 'ROE']
+    values = [financials['毛利率(%)'], financials['淨利率(%)'], financials['ROE(%)']]
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
+    
+    bars = ax.bar(categories, values, color=colors, alpha=0.8)
+    ax.set_ylabel('百分比 (%)')
+    ax.set_title('核心盈利能力指標')
+    ax.set_ylim(0, max(values) * 1.2)
+    
+    # 添加数值标签
+    for bar in bars:
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height + 1,
+                f'{height:.1f}%', ha='center', va='bottom')
+    
+    st.pyplot(fig)
+    
+    # 3. 现金流与研发
+    st.subheader("現金流與研發投入")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.metric("自由現金流", f"{financials['自由現金流(億港元)']} 億HKD")
+    with col_b:
+        st.metric("研發投入", f"{financials['研發投入(億港元)']} 億HKD", f"{yoy['研發投入同比']}%")
+    
+    st.info("💡 注：以上業績數據為示例，實際應用中可對接Tushare、雪球等API獲取真實財務數據。")
 
 # ================== 主執行邏輯 ==================
 if st.button("🚀 開始分析（超精準版）", type="primary", use_container_width=True):
@@ -511,16 +536,16 @@ if st.button("🚀 開始分析（超精準版）", type="primary", use_containe
         # 6. 执行预测
         st.subheader("🔮 價格預測計算中...（多模型融合需數秒，請耐心等待）")
         if model_choice == "多模型融合（最精準）":
-            pred, lstm_pred, rf_pred, lr_pred = ensemble_predict(df_clean, feature_cols, scaler, predict_days)
-            pred_title = "多模型融合（LSTM+隨機森林+線性回歸）"
-        elif model_choice == "LSTM時序模型（短期趨勢）":
-            pred = lstm_predict(df_clean, predict_days)
-            pred_title = "LSTM時序模型（專注短期趨勢）"
-            lstm_pred = rf_pred = lr_pred = pred
-        else:
+            pred, rf_pred, lr_pred = ensemble_predict(df_clean, feature_cols, scaler, predict_days)
+            pred_title = "多模型融合（隨機森林+線性回歸）"
+        elif model_choice == "隨機森林（多特征）":
             pred = rf_predict(df_clean, feature_cols, predict_days, scaler)
             pred_title = "隨機森林模型（多特征融合）"
-            lstm_pred = rf_pred = lr_pred = pred
+            rf_pred = lr_pred = pred
+        else:
+            pred = lr_predict(df_clean, feature_cols, predict_days)
+            pred_title = "增強線性回歸模型"
+            rf_pred = lr_pred = pred
         # 计算趋势斜率（判断涨跌强度）
         slope = round(stats.linregress(range(predict_days), pred)[0], 6)
         # 7. 生成预测交易日
@@ -528,7 +553,6 @@ if st.button("🚀 開始分析（超精準版）", type="primary", use_containe
         pred_dates = get_trading_dates(last_trading_day + timedelta(days=1), predict_days)
         # 8. 计算涨跌幅
         pred_change = [round((p / last_close - 1) * 100, 2) for p in pred]
-        lstm_change = [round((p / last_close - 1) * 100, 2) for p in lstm_pred]
         rf_change = [round((p / last_close - 1) * 100, 2) for p in rf_pred]
 
         # ========== 数据展示 ==========
@@ -607,7 +631,7 @@ if st.button("🚀 開始分析（超精準版）", type="primary", use_containe
         ax2.plot(df["Date"], df["RSI"], color="#9467bd", linewidth=1)
         ax2.axhline(70, color="#d62728", linestyle="--", alpha=0.7, label="超買線70")
         ax2.axhline(30, color="#2ca02c", linestyle="--", alpha=0.7, label="超賣線30")
-        ax2.axhline(50, color="#7f7f7f", linestyle=":", alpha=0.5, label="中軸50")
+        ax2.axhline(50, color="#7f77f7", linestyle=":", alpha=0.5, label="中軸50")
         ax2.fill_between(df["Date"], 30, 70, color="#9467bd", alpha=0.1)
         ax2.set_ylabel("RSI (14日)", fontsize=10)
         ax2.legend(fontsize=8)
@@ -645,8 +669,6 @@ if st.button("🚀 開始分析（超精準版）", type="primary", use_containe
             "預測交易日": [d.strftime("%Y-%m-%d") for d in pred_dates],
             "融合模型預測价(HK$)": [round(p,2) for p in pred],
             "漲跌幅(%)": pred_change,
-            "LSTM預測价(HK$)": [round(p,2) for p in lstm_pred],
-            "LSTM漲跌幅(%)": lstm_change,
             "隨機森林預測价(HK$)": [round(p,2) for p in rf_pred],
             "隨機森林漲跌幅(%)": rf_change
         })
@@ -655,6 +677,9 @@ if st.button("🚀 開始分析（超精準版）", type="primary", use_containe
         final_pred = pred[-1]
         final_change = round((final_pred / last_close - 1) * 100, 2)
         st.info(f"📌 預測總結：當前價{last_close:.2f} HK$ → 最後預測價{final_pred:.2f} HK$ → 整體預測漲跌幅{final_change}%")
+
+        # 新增：去年业绩分析
+        analyze_last_year_performance(user_code)
 
         # 综合技术研判
         st.subheader("📌 綜合技術研判（僅供學習參考）")
@@ -697,6 +722,6 @@ if st.button("🚀 開始分析（超精準版）", type="primary", use_containe
 # ================== 底部信息 ==================
 st.divider()
 st.caption("📌 港股分析預測系統｜超精準版")
-st.caption("✅ 核心特性：LSTM+随机森林+线性回归多模型融合｜全周期均線MA5/20/30/50/60/120｜多特征时序挖掘｜多窗口支撑压力位")
+st.caption("✅ 核心特性：隨機森林+線性回歸多模型融合｜全周期均線MA5/20/30/50/60/120｜多特征時序挖掘｜多窗口支撐壓力位｜去年業績分析")
 st.caption("✅ 兼容環境：Windows/Mac/Linux/Streamlit Cloud｜中文顯示完美解決｜數據自動補全/兜底")
 st.caption("⚠️ 本工具僅供學習，不構成任何投資建議，投資有風險，入市需謹慎！")
