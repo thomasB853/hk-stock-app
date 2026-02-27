@@ -1,13 +1,7 @@
-# 核心依賴（指定版本，避免兼容問題）
+# 僅保留必備依賴，刪除所有多餘包
 streamlit==1.35.0
 pandas==2.2.2
 numpy==1.26.4
 matplotlib==3.8.4
 yfinance==0.2.38
 scikit-learn==1.4.2
-requests==2.31.0
-
-# 依賴補充
-python-dateutil>=2.8.2
-pytz>=2024.1
-six>=1.16.0
