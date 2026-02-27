@@ -1,6 +1,9 @@
-streamlit
-pandas
-numpy
-matplotlib
-akshare
-scikit-learn
+# 基礎依賴
+streamlit>=1.30.0
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+scikit-learn>=1.3.0
+
+# 港股數據源依賴（解決yfinance缺失）
+yfinance>=0.2.30
