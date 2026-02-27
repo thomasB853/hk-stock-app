@@ -18,9 +18,10 @@ from scipy import stats
 # ================== 全局配置 ==================
 warnings.filterwarnings('ignore')
 st.set_page_config(page_title="港股專業頂級版", layout="wide")
-# 設置中文字體（兼容Streamlit Cloud）
-plt.rcParams["font.family"] = ['DejaVu Sans', 'Arial Unicode MS', 'sans-serif']
+# 增強中文字體配置（解決亂碼問題）
+plt.rcParams["font.family"] = ['WenQuanYi Zen Hei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
 plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei']  # 額外增加字體保險
 
 # ================== 依賴檢查&強制升級 ==================
 # 強制升級yfinance到最新版，解決數據源兼容問題
@@ -44,8 +45,8 @@ except ImportError:
     from sklearn.linear_model import LinearRegression
 
 # ================== 頁面UI ==================
-st.title("📈 港股分析預測系統｜優化版")
-st.markdown("### 支持：騰訊、美團、匯豐等主流港股（預測模型升級：隨機森林+多特征）")
+st.title("📈 港股分析預測系統｜增強版")
+st.markdown("### 支持：騰訊、美團、匯豐等主流港股 + 恆生指數（預測模型升級：隨機森林+多特征）")
 
 # 熱門港股（篩選Yahoo Finance數據穩定的標的）
 hot_stocks = {
@@ -54,11 +55,12 @@ hot_stocks = {
     "匯豐控股 (0005)": "0005",
     "小米集團-W (1810)": "1810",
     "阿里巴巴-SW (9988)": "9988",
-    "工商銀行 (1398)": "1398"
+    "工商銀行 (1398)": "1398",
+    "恆生指數 (^HSI)": "^HSI"
 }
-option = st.selectbox("選擇熱門港股（數據穩定）", list(hot_stocks.keys()))
+option = st.selectbox("選擇熱門港股/指數（數據穩定）", list(hot_stocks.keys()))
 default_code = hot_stocks[option]
-user_code = st.text_input("手動輸入港股代碼（4-5位數字，如0700）", default_code).strip()
+user_code = st.text_input("手動輸入港股代碼（4-5位數字，如0700）或恆生指數(^HSI)", default_code).strip()
 predict_days = st.slider("預測天數（1-15天）", 1, 15, 5)
 
 # ================== 核心工具函數 ==================
@@ -114,16 +116,80 @@ def clean_column_names(df):
     df.rename(columns=final_cols, inplace=True)
     return df
 
+# ================== 業績查詢函數 ==================
+def get_stock_financials(stock_code):
+    """獲取港股公司去年財務業績（基於公開API）"""
+    if stock_code == "^HSI":
+        return "恆生指數為市場指數，無單獨業績數據"
+    
+    try:
+        # 使用財務數據API獲取業績（備用方案）
+        # 方案1：直接從yfinance獲取財務數據
+        yf_symbol = f"{stock_code}.HK"
+        ticker = yf.Ticker(yf_symbol)
+        
+        # 獲取年度財務報表
+        financials = ticker.financials
+        if not financials.empty:
+            # 取最新財務年度數據（去年）
+            last_year = datetime.now().year - 1
+            financials.columns = [pd.to_datetime(col).year for col in financials.columns]
+            if last_year in financials.columns:
+                year_data = financials[last_year]
+                
+                # 整理核心業績指標
+                performance = {
+                    "營業收入": year_data.get("Total Revenue", "N/A"),
+                    "淨利潤": year_data.get("Net Income", "N/A"),
+                    "每股收益": year_data.get("Basic EPS", "N/A"),
+                    "總資產": year_data.get("Total Assets", "N/A"),
+                    "總負債": year_data.get("Total Liabilities", "N/A")
+                }
+                
+                # 格式化數據
+                perf_df = pd.DataFrame(list(performance.items()), columns=["指標", "數值（HKD）"])
+                perf_df["數值（HKD）"] = perf_df["數值（HKD）"].apply(lambda x: f"{x:,.2f}" if x != "N/A" else x)
+                return perf_df
+        
+        # 方案2：備用API（如果yfinance財務數據缺失）
+        url = f"https://api.finance.qq.com/stock/finance/hk/{stock_code}/index.json"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        }
+        resp = requests.get(url, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            data = resp.json()
+            if "data" in data and "finance" in data["data"]:
+                finance_data = data["data"]["finance"]
+                performance = {
+                    "營業收入": finance_data.get("operating_revenue", "N/A"),
+                    "淨利潤": finance_data.get("net_profit", "N/A"),
+                    "每股收益": finance_data.get("eps", "N/A"),
+                    "資產負債率": finance_data.get("debt_ratio", "N/A"),
+                    "股息率": finance_data.get("dividend_yield", "N/A")
+                }
+                perf_df = pd.DataFrame(list(performance.items()), columns=["指標", "數值"])
+                return perf_df
+        
+        return "暫無該股票去年業績數據（數據源限制）"
+    
+    except Exception as e:
+        st.warning(f"⚠️ 業績數據獲取失敗：{str(e)[:100]}")
+        return "業績數據獲取失敗，請稍後再試"
+
 # ================== 穩定的數據獲取函數 ==================
 @st.cache_data(ttl=3600)  # 緩存1小時，減少請求次數
 def get_hk_stock_data(symbol):
     """
-    獲取港股數據（多層次兼容+兜底+請求優化）
-    :param symbol: 港股代碼（如0700）
+    獲取港股/指數數據（多層次兼容+兜底+請求優化）
+    :param symbol: 港股代碼（如0700）或恆生指數(^HSI)
     :return: 清洗後的DataFrame或None
     """
     # 步驟1：構建標準Yahoo Finance代碼
-    yf_symbol = f"{symbol}.HK"
+    if symbol == "^HSI":
+        yf_symbol = "^HSI"
+    else:
+        yf_symbol = f"{symbol}.HK"
     st.info(f"🔍 正在獲取數據：{yf_symbol}")
     
     # 步驟2：下載數據（擴展時間範圍，增加成功率）
@@ -131,7 +197,7 @@ def get_hk_stock_data(symbol):
     start_date = end_date - timedelta(days=3*365)  # 拉長到3年，確保有數據
     
     try:
-        # 核心優化：提升港股兼容性
+        # 核心優化：提升港股/指數兼容性
         df = yf.download(
             yf_symbol,
             start=start_date.strftime("%Y-%m-%d"),
@@ -164,12 +230,12 @@ def get_hk_stock_data(symbol):
                     'High': quote['high'],
                     'Low': quote['low'],
                     'Close': quote['close'],
-                    'Volume': quote['volume']
+                    'Volume': quote.get('volume', [0]*len(ts))
                 })
                 # 去除空值
                 df = df.dropna(subset=['Close'])
             else:
-                st.error(f"❌ 未獲取到 {yf_symbol} 的數據（可能是代碼錯誤/股票未上市/停牌）")
+                st.error(f"❌ 未獲取到 {yf_symbol} 的數據（可能是代碼錯誤/指數未上市/停牌）")
                 return None
         
         # 步驟4：重置索引（Date列還原為普通列）
@@ -219,13 +285,13 @@ def get_hk_stock_data(symbol):
         st.error(f"❌ 數據獲取異常：{str(e)[:100]}")
         st.info("💡 解決方案：")
         st.info("1. 刷新頁面重試（網絡/數據源臨時波動）")
-        st.info("2. 確認港股代碼格式（必須是4-5位數字，如0700而非700）")
+        st.info("2. 確認港股代碼格式（必須是4-5位數字，如0700而非700）或輸入^HSI查詢恆生指數")
         st.info("3. 更換熱門港股測試（如騰訊0700、小米1810）")
         return None
 
-# ================== 技術指標計算 ==================
+# ================== 技術指標計算（新增MA30/50/100） ==================
 def calculate_indicators(df):
-    """計算技術指標（兼容缺失字段）"""
+    """計算技術指標（兼容缺失字段，新增MA30/50/100）"""
     if df is None or len(df) == 0:
         return None
     
@@ -234,6 +300,9 @@ def calculate_indicators(df):
         # 移動平均線（最小週期1，避免空值）
         df["MA5"] = df["Close"].rolling(window=5, min_periods=1).mean()
         df["MA20"] = df["Close"].rolling(window=20, min_periods=1).mean()
+        df["MA30"] = df["Close"].rolling(window=30, min_periods=1).mean()  # 新增
+        df["MA50"] = df["Close"].rolling(window=50, min_periods=1).mean()  # 新增
+        df["MA100"] = df["Close"].rolling(window=100, min_periods=1).mean()  # 新增
         
         # MACD
         df["EMA12"] = df["Close"].ewm(span=12, adjust=False, min_periods=1).mean()
@@ -284,10 +353,12 @@ def prepare_features(df):
     df_feat["high_low_diff"] = df_feat["High"] - df_feat["Low"]
     df_feat["open_close_diff"] = df_feat["Open"] - df_feat["Close"]
     
-    # 技術指標特征（復用已計算的MA/RSI/MACD）
+    # 技術指標特征（包含新增的MA線）
     df_feat["rsi_norm"] = df_feat["RSI"] / 100  # 歸一化RSI
     df_feat["macd_diff"] = df_feat["MACD"] - df_feat["MACD_Signal"]
     df_feat["ma5_ma20_diff"] = df_feat["MA5"] - df_feat["MA20"]
+    df_feat["ma20_ma30_diff"] = df_feat["MA20"] - df_feat["MA30"]  # 新增
+    df_feat["ma30_ma50_diff"] = df_feat["MA30"] - df_feat["MA50"]  # 新增
     df_feat["close_ma5_diff"] = df_feat["Close"] - df_feat["MA5"]
     
     # 成交量特征
@@ -305,8 +376,8 @@ def prepare_features(df):
     # 特征列篩選（僅保留數值型特征）
     feature_cols = [
         "price_change", "high_low_diff", "open_close_diff",
-        "rsi_norm", "macd_diff", "ma5_ma20_diff", "close_ma5_diff",
-        "volume_change", "day_of_week", "month"
+        "rsi_norm", "macd_diff", "ma5_ma20_diff", "ma20_ma30_diff", "ma30_ma50_diff",
+        "close_ma5_diff", "volume_change", "day_of_week", "month"
     ]
     # 確保特征列存在
     feature_cols = [col for col in feature_cols if col in df_feat.columns]
@@ -413,10 +484,10 @@ def backtest_model(df):
         return f"回測失敗：{str(e)[:50]}"
 
 # ================== 主執行邏輯 ==================
-if st.button("🚀 開始分析（優化版）", type="primary"):
+if st.button("🚀 開始分析（增強版）", type="primary"):
     # 輸入驗證
-    if not user_code.isdigit() or len(user_code) not in [4,5]:
-        st.error("❌ 港股代碼格式錯誤！必須是4-5位數字（如騰訊=0700，小米=1810）")
+    if user_code != "^HSI" and (not user_code.isdigit() or len(user_code) not in [4,5]):
+        st.error("❌ 格式錯誤！港股代碼必須是4-5位數字（如0700），恆生指數請輸入^HSI")
     else:
         # 獲取數據
         df = get_hk_stock_data(user_code)
@@ -428,6 +499,14 @@ if st.button("🚀 開始分析（優化版）", type="primary"):
         if df is None:
             st.stop()
         
+        # 獲取業績數據
+        st.subheader("📋 去年財務業績")
+        financial_data = get_stock_financials(user_code)
+        if isinstance(financial_data, pd.DataFrame):
+            st.dataframe(financial_data, use_container_width=True)
+        else:
+            st.info(financial_data)
+        
         # 計算支撐壓力位
         sup, res = calculate_support_resistance(df)
         # 優化版預測（帶置信區間）
@@ -435,29 +514,38 @@ if st.button("🚀 開始分析（優化版）", type="primary"):
         last_close = df["Close"].iloc[-1]
         
         # ========== 展示數據 ==========
-        # 最新10筆數據
+        # 最新10筆數據（包含新增MA線）
         st.subheader("📊 最新交易數據（前10筆）")
-        show_df = df[["Date","Open","High","Low","Close","Volume","MA5","MA20"]].tail(10)
-        show_df = show_df.round({
-            "Open":2, "High":2, "Low":2, "Close":2, 
-            "Volume":0, "MA5":2, "MA20":2
-        })
+        show_cols = ["Date","Open","High","Low","Close","Volume","MA5","MA20","MA30","MA50","MA100"]
+        show_cols = [col for col in show_cols if col in df.columns]
+        show_df = df[show_cols].tail(10)
+        # 格式化數據
+        format_dict = {col: 2 for col in ["Open","High","Low","Close","MA5","MA20","MA30","MA50","MA100"] if col in show_df.columns}
+        if "Volume" in show_df.columns:
+            format_dict["Volume"] = 0
+        show_df = show_df.round(format_dict)
         st.dataframe(show_df, use_container_width=True)
         
-        # 價格走勢圖
+        # 價格走勢圖（包含新增MA線）
         col1, col2 = st.columns(2)
         with col1:
-            st.subheader("📈 價格 & 均線走勢")
-            fig, ax = plt.subplots(figsize=(8,4))
+            st.subheader("📈 價格 & 多周期均線走勢")
+            fig, ax = plt.subplots(figsize=(10,6))
             ax.plot(df["Date"], df["Close"], label="收盤價", color="#1f77b4", linewidth=1.5)
             ax.plot(df["Date"], df["MA5"], label="MA5（5日均線）", color="#ff7f0e", linewidth=1, alpha=0.8)
             ax.plot(df["Date"], df["MA20"], label="MA20（20日均線）", color="#2ca02c", linewidth=1, alpha=0.8)
-            ax.set_title(f"{option} ({user_code}.HK) 價格走勢", fontsize=10)
-            ax.set_xlabel("日期", fontsize=8)
-            ax.set_ylabel("價格 (HK$)", fontsize=8)
-            ax.legend(fontsize=8)
-            ax.tick_params(axis='both', labelsize=7)
+            ax.plot(df["Date"], df["MA30"], label="MA30（30日均線）", color="#d62728", linewidth=1, alpha=0.8)
+            ax.plot(df["Date"], df["MA50"], label="MA50（50日均線）", color="#9467bd", linewidth=1, alpha=0.8)
+            ax.plot(df["Date"], df["MA100"], label="MA100（100日均線）", color="#8c564b", linewidth=1, alpha=0.8)
+            
+            # 優化圖表樣式
+            ax.set_title(f"{option if user_code in hot_stocks.values() else user_code} 價格走勢", fontsize=12)
+            ax.set_xlabel("日期", fontsize=10)
+            ax.set_ylabel("價格 (HK$)", fontsize=10)
+            ax.legend(fontsize=9)
+            ax.tick_params(axis='both', labelsize=8)
             plt.xticks(rotation=45)
+            plt.tight_layout()  # 自動調整布局
             st.pyplot(fig)
         
         with col2:
@@ -473,17 +561,18 @@ if st.button("🚀 開始分析（優化版）", type="primary"):
         
         # RSI指標圖
         st.subheader("📊 RSI 14日超買超賣指標")
-        fig_r, ax_r = plt.subplots(figsize=(10,3))
+        fig_r, ax_r = plt.subplots(figsize=(10,4))
         ax_r.plot(df["Date"], df["RSI"], color="#9467bd", linewidth=1)
         ax_r.axhline(70, c="#d62728", ls="--", alpha=0.7, label="超買線(70)")
         ax_r.axhline(30, c="#2ca02c", ls="--", alpha=0.7, label="超賣線(30)")
         ax_r.axhline(50, c="#7f7f7f", ls=":", alpha=0.5, label="中軸(50)")
-        ax_r.set_title("RSI 走勢（14日）", fontsize=10)
-        ax_r.set_xlabel("日期", fontsize=8)
-        ax_r.set_ylabel("RSI 值", fontsize=8)
-        ax_r.legend(fontsize=8)
-        ax_r.tick_params(axis='both', labelsize=7)
+        ax_r.set_title("RSI 走勢（14日）", fontsize=12)
+        ax_r.set_xlabel("日期", fontsize=10)
+        ax_r.set_ylabel("RSI 值", fontsize=10)
+        ax_r.legend(fontsize=9)
+        ax_r.tick_params(axis='both', labelsize=8)
         plt.xticks(rotation=45)
+        plt.tight_layout()
         st.pyplot(fig_r)
         
         # 優化版價格預測（帶置信區間）
@@ -506,7 +595,7 @@ if st.button("🚀 開始分析（優化版）", type="primary"):
         
         # 強化風險提示
         st.warning("⚠️ 預測風險提示：")
-        st.warning("1. 股價受政策、資金、消息等多因素影響，預測僅為技術面參考；")
+        st.warning("1. 股價/指數受政策、資金、消息等多因素影響，預測僅為技術面參考；")
         st.warning("2. 95%置信區間代表預測波動範圍，區間越寬，不確定性越高；")
         st.warning("3. 本模型未考慮停牌、分紅、除權等港股特殊事件，僅供學習使用。")
         
@@ -515,19 +604,21 @@ if st.button("🚀 開始分析（優化版）", type="primary"):
         rsi = df["RSI"].iloc[-1]
         ma5 = df["MA5"].iloc[-1]
         ma20 = df["MA20"].iloc[-1]
+        ma30 = df["MA30"].iloc[-1]
         col_advice1, col_advice2 = st.columns(2)
         with col_advice1:
             st.markdown("### 指標狀態")
             st.write(f"RSI當前值：{rsi:.1f}")
-            st.write(f"MA5：{ma5:.2f} | MA20：{ma20:.2f}")
+            st.write(f"MA5：{ma5:.2f} | MA20：{ma20:.2f} | MA30：{ma30:.2f}")
             st.write(f"價格/MA5：{'↑ 站穩' if last_close > ma5 else '↓ 跌破'}")
             st.write(f"MA5/MA20：{'↑ 金叉' if ma5 > ma20 else '↓ 死叉'}")
+            st.write(f"MA20/MA30：{'↑ 金叉' if ma20 > ma30 else '↓ 死叉'}")
         with col_advice2:
             st.markdown("### 操作建議")
-            if ma5 > ma20 and rsi < 65:
-                st.success("✅ 趨勢向上，可適度關注")
-            elif ma5 < ma20:
-                st.warning("⚠️ 短期趨勢偏弱，謹慎操作")
+            if ma5 > ma20 and ma20 > ma30 and rsi < 65:
+                st.success("✅ 多周期均線向上，趨勢強勁，可適度關注")
+            elif ma5 < ma20 and ma20 < ma30:
+                st.warning("⚠️ 多周期均線向下，短期趨勢偏弱，謹慎操作")
             elif rsi > 70:
                 st.warning("⚠️ RSI超買，注意回調風險")
             elif rsi < 30:
@@ -541,4 +632,5 @@ st.caption("⚠️ 重要提示：")
 st.caption("1. 本工具僅供編程學習使用，不構成任何投資建議")
 st.caption("2. 數據來源為Yahoo Finance，請以港交所官方數據為準")
 st.caption("3. 預測模型已升級為隨機森林+多特征融合，相比線性回歸更貼近實際走勢")
-st.caption("4. 若仍失敗，請檢查網絡或稍後重試（數據源臨時維護）")
+st.caption("4. 新增MA30/50/100均線、去年業績查詢、恆生指數預測功能")
+st.caption("5. 若仍失敗，請檢查網絡或稍後重試（數據源臨時維護）")
